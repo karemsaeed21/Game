@@ -299,5 +299,4 @@ void drawCat()
     drawtail();
     drawhands();
     drawfeet();
-    glFlush();
 }

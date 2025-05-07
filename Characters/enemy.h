@@ -9,10 +9,15 @@ void Body();
 void RightLeg();
 void LeftLeg();
 void drawCreeper();
+// struct Enemy
+// {
+//     float x, y;
+//     bool isVisible;
+//     Enemy(float startX, float startY) : x(startX), y(startY), isVisible(true) {}
+// };
 struct Enemy
 {
     float x, y;
-    bool isVisible;
-    Enemy(float startX, float startY) : x(startX), y(startY), isVisible(true) {}
+    float speed;
 };
 #endif
