@@ -300,6 +300,8 @@
 #include <cmath>
 #include <vector>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime> 
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "./dependencies/library/stb_image.h"
@@ -312,12 +314,20 @@ enum GameState
 {
     START_SCREEN,
     GAME_RUNNING,
+    PAUSED,
     GAME_OVER
 };
 GameState gameState = START_SCREEN;
+float velocityY = 0.0f;
+bool isJumping = false;
+const float gravity = -0.01f;
+const float jumpStrength = 0.2f;
+const float groundY = -2.05f;
+
+int characterHealth[] = {3, 3};
 
 // Positions
-float translateY = -2.2f;
+float translateY = -2.05f;
 float currentX = -3.5f;
 float targetX = -3.5f;
 float outgoingX = -3.5f;
@@ -330,11 +340,13 @@ bool isOutgoingDone = false;
 
 GLuint backgroundTexture;
 
+int score = 0;
+
 std::vector<Enemy> enemies;
 int level = 1;
 int maxLevel = 5;
 
-int enemiesPerLevel[] = {0, 2, 5, 10, 15, 20}; // Level 0 unused
+int enemiesPerLevel[] = {0, 2, 5, 10, 15, 20};
 
 GLuint loadTexture(const char *filename)
 {
@@ -364,11 +376,14 @@ GLuint loadTexture(const char *filename)
 void spawnEnemies(int count)
 {
     enemies.clear();
+    srand(static_cast<unsigned>(time(0))); // Seed random generator
+
     for (int i = 0; i < count; ++i)
     {
-        float y = -3.0f;           // or vary if needed
-        float x = 5.2f + i * 0.5f; // Staggered entry
-        enemies.push_back({x, y});
+        float y = -3.0f;
+        float x = 4.0f + static_cast<float>(rand() % 100) / 10.0f;
+        float speed = 0.01f + static_cast<float>(rand() % 10) / 1000.0f;
+        enemies.push_back({x, y, speed});
     }
 }
 
@@ -389,15 +404,15 @@ void updateEnemies(int value)
     if (gameState != GAME_RUNNING)
         return;
 
-    float speed = 0.02f;
     for (auto &enemy : enemies)
     {
-        enemy.x -= speed;
+        enemy.x -= enemy.speed;
     }
 
     glutPostRedisplay();
     glutTimerFunc(30, updateEnemies, 0);
 }
+
 
 void drawText(const char *text)
 {
@@ -531,11 +546,68 @@ void drawTransition()
         drawCharacter();
 }
 
+void drawHealthBar()
+{
+    float healthBarWidth = 0.5f;
+    float healthBarHeight = 0.05f;
+    float healthX = -0.75f;
+    float healthY = 0.9f;
+
+    // Get the health of the current character
+    int health = characterHealth[currentCharacter - 1];
+
+    glPushMatrix();
+    glTranslatef(healthX, healthY, 0.0f);
+
+    // Change the color of the health bar based on the health of the character
+    if (health > 2)
+        glColor3f(0.0f, 1.0f, 0.0f); // Green
+    else if (health > 1)
+        glColor3f(1.0f, 1.0f, 0.0f); // Yellow
+    else
+        glColor3f(1.0f, 0.0f, 0.0f); // Red
+
+    // Draw the health bar (rounded rectangle)
+    glBegin(GL_QUADS);
+    glVertex2f(-healthBarWidth / 2.0f, -healthBarHeight / 2.0f);
+    glVertex2f(healthBarWidth / 2.0f, -healthBarHeight / 2.0f);
+    glVertex2f(healthBarWidth / 2.0f, healthBarHeight / 2.0f);
+    glVertex2f(-healthBarWidth / 2.0f, healthBarHeight / 2.0f);
+    glEnd();
+
+    glPopMatrix();
+}
+
+void updateJump()
+{
+    if (!isJumping)
+        return;
+
+    velocityY += gravity;
+    translateY += velocityY;
+
+    
+    if (translateY <= groundY)
+    {
+        translateY = groundY;
+        velocityY = 0.0f;
+        isJumping = false;
+    }
+
+    else
+    {
+        glutTimerFunc(16, [](int)
+                      { updateJump(); }, 0); // Continue jump update
+    }
+
+    glutPostRedisplay();
+}
+
 void keyboard(unsigned char key, int x, int y)
 {
     switch (key)
     {
-    case 's':
+    case 'e':
         if (gameState == START_SCREEN)
         {
             gameState = GAME_RUNNING;
@@ -584,6 +656,36 @@ void keyboard(unsigned char key, int x, int y)
             }
         }
         break;
+    case 'a':
+        if (gameState == GAME_RUNNING && !isTransitioning)
+            currentX -= 0.1f;
+        break;
+    case 'd':
+        if (gameState == GAME_RUNNING && !isTransitioning)
+            currentX += 0.1f;
+        break;
+    case ' ':
+        if (gameState == GAME_RUNNING && !isJumping)
+        {
+            isJumping = true;
+            velocityY = jumpStrength;
+            glutTimerFunc(16, [](int)
+                          { updateJump(); }, 0);
+        }
+        break;
+    case 'p':
+        if (gameState == GAME_RUNNING)
+        {
+            gameState = PAUSED;
+        }
+        else if (gameState == PAUSED)
+        {
+            gameState = GAME_RUNNING;
+            glutTimerFunc(30, updateEnemies, 0);
+        }
+        glutPostRedisplay();
+        break;
+
     case 27:
         exit(0);
     }
@@ -601,13 +703,18 @@ void display()
     switch (gameState)
     {
     case START_SCREEN:
-        drawText("Press 's' to Start the Game");
+        drawText("Press 'e' to Start the Game");
         break;
     case GAME_RUNNING:
         drawTransition();
         if (!isTransitioning)
             drawCharacter();
         drawEnemies();
+        drawHealthBar();
+        break;
+    case PAUSED:
+        drawText("Game Paused");
+        drawText("Press 'p' to Resume");
         break;
     case GAME_OVER:
         drawText("Game Over!");
@@ -622,18 +729,25 @@ int main(int argc, char **argv)
 {
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB);
-    glutInitWindowSize(2000, 2000);
-    glutCreateWindow("Game");
+    glutInitWindowSize(2000, 2000); // Use 2000 if you want ultra-HD
+    glutCreateWindow("OpenGL Character Game");
 
+    // Load background texture
+    backgroundTexture = loadTexture("2_21.png");
+
+    // Set up orthographic projection
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     gluOrtho2D(-1.0, 1.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
 
-    backgroundTexture = loadTexture("background.jpg");
-
+    // Register callbacks
     glutDisplayFunc(display);
     glutKeyboardFunc(keyboard);
 
+    // Start main loop
     glutMainLoop();
+
     return 0;
 }
