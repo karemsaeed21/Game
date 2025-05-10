@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
-#include <ctime> 
+#include <ctime>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "./dependencies/library/stb_image.h"
@@ -12,28 +12,47 @@
 #include "./Characters/cat.h"
 #include "./Characters/amoungus.h"
 #include "./Characters/enemy.h"
+#include <list>
+#include <algorithm>
+
+bool canFire = true;
+const int FIRE_COOLDOWN = 500; // Cooldown in milliseconds (0.5 seconds)
+// Add after other global variables
+struct Projectile
+{
+    float x; // Current position
+    float y;
+    float direction; // Direction of movement (1.0f for right)
+    bool active;
+};
+
+std::list<Projectile> projectiles;
+const float PROJECTILE_SPEED = 0.05f;
 
 enum GameState
 {
     START_SCREEN,
     GAME_RUNNING,
     PAUSED,
-    GAME_OVER
+    GAME_OVER,
+    LEVEL_COMPLETE,
+    GAME_WON // Add this new state
 };
 GameState gameState = START_SCREEN;
 float velocityY = 0.0f;
 bool isJumping = false;
-const float gravity = -0.01f;
-const float jumpStrength = 0.2f;
-const float groundY = -2.05f;
+const float gravity = -0.01f;         // Reduced gravity
+const float jumpStrength = 0.15f;     // Increased jump height
+const float characterGroundY = -0.5f; // Ground level for character
+const float enemyGroundY = -0.5f;     // Ground level for enemy (0.1 lower)
+float translateY = characterGroundY;  // Start character at its ground level
+float currentX = -0.8f;               // Move character more to the right
 
-int characterHealth[] = {3, 3};
+int characterHealth[] = {2, 5};
 
 // Positions
-float translateY = -2.05f;
-float currentX = -3.5f;
-float targetX = -3.5f;
-float outgoingX = -3.5f;
+float targetX = -0.5f;   // Match currentX
+float outgoingX = -0.5f; // Match currentX
 
 // States
 int currentCharacter = 1;
@@ -51,6 +70,21 @@ int maxLevel = 5;
 
 int enemiesPerLevel[] = {0, 2, 5, 10, 15, 20};
 
+// Add after other global variables
+int enemiesKilled = 0;       // Counter for killed enemies
+int totalEnemiesInLevel = 0; // Total enemies in current level
+
+// Add after other global variables
+float lastFrameTime = 0.0f;
+const float MOVEMENT_SPEED = 0.3f; // Base movement speed
+
+// Add after other global variables
+const float COLLISION_RADIUS = 0.2f; // Collision radius for characters and enemies
+
+// Add these global variables at the top with other globals
+bool isCharacterDead = false;
+int lastAliveCharacter = 0;
+
 GLuint loadTexture(const char *filename)
 {
     int width, height, channels;
@@ -58,11 +92,18 @@ GLuint loadTexture(const char *filename)
     if (!data)
     {
         printf("Failed to load image: %s\n", filename);
-        exit(1);
+        return 0; // Return 0 instead of exiting
     }
 
     GLuint textureID;
     glGenTextures(1, &textureID);
+    if (textureID == 0)
+    {
+        stbi_image_free(data);
+        printf("Failed to generate texture\n");
+        return 0;
+    }
+
     glBindTexture(GL_TEXTURE_2D, textureID);
 
     GLenum format = (channels == 4) ? GL_RGBA : GL_RGB;
@@ -76,46 +117,207 @@ GLuint loadTexture(const char *filename)
     return textureID;
 }
 
-void spawnEnemies(int count)
-{
-    enemies.clear();
-    srand(static_cast<unsigned>(time(0))); // Seed random generator
+// Add after other function declarations, before the implementation functions
+void updateAnimation(int value); // Add this forward declaration
 
-    for (int i = 0; i < count; ++i)
+// Add after other forward declarations
+void updateEnemies(int value);
+void updateAnimation(int value);
+
+// Add this helper function to draw transparent boxes
+void drawTransparentBox(float x, float y, float width, float height)
+{
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glColor4f(0.0f, 0.0f, 0.0f, 0.0f); // Red with 30% opacity
+    glBegin(GL_QUADS);
+    glVertex2f(x - width / 2, y - height / 2);
+    glVertex2f(x + width / 2, y - height / 2);
+    glVertex2f(x + width / 2, y + height / 2);
+    glVertex2f(x - width / 2, y + height / 2);
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
+void handleCharacterDeath()
+{
+    // If current character dies, switch to the other one immediately
+    if (currentCharacter == 1 && characterHealth[0] <= 0)
     {
-        float y = -3.0f;
-        float x = 4.0f + static_cast<float>(rand() % 100) / 10.0f;
-        float speed = 0.01f + static_cast<float>(rand() % 10) / 1000.0f;
-        enemies.push_back({x, y, speed});
+        if (characterHealth[1] > 0) // Only switch if character 2 is alive
+        {
+            nextCharacter = 2;
+            isTransitioning = true;
+            isOutgoingDone = false;
+            outgoingX = currentX;
+            lastAliveCharacter = 2;
+            glutTimerFunc(0, updateAnimation, 0);
+            return; // Exit immediately after starting transition
+        }
+    }
+    else if (currentCharacter == 2 && characterHealth[1] <= 0)
+    {
+        if (characterHealth[0] > 0) // Only switch if character 1 is alive
+        {
+            nextCharacter = 1;
+            isTransitioning = true;
+            isOutgoingDone = false;
+            outgoingX = currentX;
+            lastAliveCharacter = 1;
+            glutTimerFunc(0, updateAnimation, 0);
+            return; // Exit immediately after starting transition
+        }
+    }
+
+    // Only set game over if both characters are actually dead
+    if (characterHealth[0] <= 0 && characterHealth[1] <= 0)
+    {
+        gameState = GAME_OVER;
     }
 }
 
+// Update spawnEnemies function to match character scale
+void spawnEnemies(int count)
+{
+    enemies.clear();
+    enemiesKilled = 0;
+    totalEnemiesInLevel = count;
+    srand(static_cast<unsigned>(time(0)));
+
+    for (int i = 0; i < count; ++i)
+    {
+        float x = 1.0f + static_cast<float>(rand() % 100) / 50.0f;
+        float speed = 0.01f + static_cast<float>(rand() % 10) / 1000.0f;
+        enemies.push_back(Enemy(x, enemyGroundY, speed));
+    }
+}
+
+// Update drawEnemies function for parallel positioning
 void drawEnemies()
 {
     for (const auto &enemy : enemies)
     {
+        if (!enemy.isActive)
+            continue;
+
         glPushMatrix();
-        glScalef(0.2f, 0.2f, 1.0f);
-        glTranslatef(enemy.x, enemy.y, 0.0f);
+        glScalef(0.25f, 0.25f, 1.0f);
+        glTranslatef(enemy.x * 4.0f, enemy.y * 4.0f, 0.0f);
+        glRotatef(enemy.rotation, 0.0f, 0.0f, 1.0f); // Add rotation
+
         drawCreeper();
+
+        // Draw enemy collision box with same size as character
+        drawTransparentBox(0, 0, 1.0f, 1.0f);
+
         glPopMatrix();
     }
 }
 
+// Update collision detection for parallel positioning
+bool checkCharacterEnemyCollision(float charX, float charY, float enemyX, float enemyY)
+{
+    float dx = (charX * 4.0f) - (enemyX * 4.0f);
+    float dy = (charY * 4.0f) - (enemyY * 4.0f);
+    float distance = std::sqrt(dx * dx + dy * dy);
+    return distance < 0.5f;
+}
+
+// Update updateEnemies collision check
 void updateEnemies(int value)
 {
     if (gameState != GAME_RUNNING)
         return;
 
+    bool needsUpdate = false;
+
     for (auto &enemy : enemies)
     {
-        enemy.x -= enemy.speed;
+        if (!enemy.isActive)
+            continue;
+
+        if (enemy.isFalling)
+        {
+            // Gradually decrease rotation speed very slowly
+            enemy.rotationSpeed = std::max(0.0f, enemy.rotationSpeed - 0.8f);
+            enemy.rotation += enemy.rotationSpeed;
+            enemy.y -= 0.05f; // Reduced from 0.2f to 0.05f for slower falling
+            if (enemy.y < -5.0f)
+            {
+                enemy.isActive = false;
+            }
+        }
+        else
+        {
+            enemy.x -= enemy.speed;
+
+            if (enemy.x < currentX - 0.5f && !enemy.hasPassed)
+            {
+                enemy.hasPassed = true;
+                float newX = 1.0f + static_cast<float>(rand() % 100) / 50.0f;
+                float newSpeed = 0.01f + static_cast<float>(rand() % 10) / 1000.0f;
+                enemies.push_back(Enemy(newX, enemyGroundY, newSpeed));
+            }
+
+            // Only check collision if not transitioning and character is alive
+            if (!isTransitioning && characterHealth[currentCharacter - 1] > 0)
+            {
+                if (std::abs(enemy.x - currentX) < 0.2f &&
+                    std::abs(enemy.y - translateY) < 0.1f)
+                {
+                    characterHealth[currentCharacter - 1] = std::max(0, characterHealth[currentCharacter - 1] - 1);
+                    enemy.isFalling = true;
+                    enemy.speed = 0.0f;
+                    enemy.rotationSpeed = 50.0f; // Reset rotation speed when starting to fall
+                    enemiesKilled++;
+
+                    // If current character dies, handle the switch immediately
+                    if (characterHealth[currentCharacter - 1] <= 0)
+                    {
+                        handleCharacterDeath();
+                    }
+
+                    // Check level completion separately from character death
+                    if (enemiesKilled >= totalEnemiesInLevel && characterHealth[0] > 0 && characterHealth[1] > 0)
+                    {
+                        if (level < maxLevel)
+                        {
+                            gameState = LEVEL_COMPLETE;
+                            score += 500;
+                            glutPostRedisplay();
+                        }
+                        else
+                        {
+                            gameState = GAME_WON;
+                            score += 1000;
+                            glutPostRedisplay();
+                        }
+                    }
+                    needsUpdate = true;
+                }
+            }
+        }
+        needsUpdate = true;
     }
 
-    glutPostRedisplay();
-    glutTimerFunc(30, updateEnemies, 0);
-}
+    enemies.erase(
+        std::remove_if(enemies.begin(), enemies.end(),
+                       [](const Enemy &e)
+                       { return !e.isActive; }),
+        enemies.end());
 
+    if (needsUpdate)
+    {
+        glutPostRedisplay();
+    }
+
+    if (gameState == GAME_RUNNING)
+    {
+        glutTimerFunc(30, updateEnemies, 0);
+    }
+}
 
 void drawText(const char *text)
 {
@@ -191,25 +393,32 @@ void updateAnimation(int value)
     if (!isTransitioning)
         return;
 
-    float speed = 0.1f;
+    float speed = 0.08f;         // Slightly faster than original 0.05f
+    float exitPosition = -1.5f;  // Closer exit position
+    float enterPosition = -1.5f; // Start from left side, closer
+    float finalPosition = -0.8f; // Final resting position
 
     if (!isOutgoingDone)
     {
+        // Move first character to the left (exit) smoothly
         outgoingX -= speed;
-        if (outgoingX < -4.0f)
+        if (outgoingX < exitPosition)
         {
             isOutgoingDone = true;
             currentCharacter = nextCharacter;
-            currentX = -4.0f;
+            currentX = enterPosition;      // Start new character from left side
+            translateY = characterGroundY; // Maintain ground level
         }
     }
     else
     {
+        // Move new character from left to final position smoothly
         currentX += speed;
-        if (currentX >= -3.5f)
+        if (currentX >= finalPosition)
         {
-            currentX = -3.5f;
+            currentX = finalPosition;
             isTransitioning = false;
+            translateY = characterGroundY; // Maintain ground level
         }
     }
 
@@ -217,16 +426,20 @@ void updateAnimation(int value)
     glutTimerFunc(16, updateAnimation, 0);
 }
 
+// Update drawCharacter function for correct positioning
 void drawCharacter()
 {
     glPushMatrix();
     glScalef(0.25f, 0.25f, 1.0f);
-    glTranslatef(currentX, translateY, 0.0f);
+    glTranslatef(currentX * 4.0f, translateY * 4.0f, 0.0f);
 
     if (currentCharacter == 1)
         drawCat();
     else if (currentCharacter == 2)
         DrawCharacter();
+
+    // Draw character collision box with same size as enemy
+    drawTransparentBox(0, 0, 1.0f, 1.0f);
 
     glPopMatrix();
 }
@@ -235,9 +448,10 @@ void drawTransition()
 {
     if (isTransitioning && !isOutgoingDone)
     {
+        // Draw outgoing character
         glPushMatrix();
         glScalef(0.25f, 0.25f, 1.0f);
-        glTranslatef(outgoingX, translateY, 0.0f);
+        glTranslatef(outgoingX * 4.0f, translateY * 4.0f, 0.0f);
         if (currentCharacter == 1)
             drawCat();
         else if (currentCharacter == 2)
@@ -246,7 +460,17 @@ void drawTransition()
     }
 
     if (isTransitioning && isOutgoingDone)
-        drawCharacter();
+    {
+        // Draw incoming character
+        glPushMatrix();
+        glScalef(0.25f, 0.25f, 1.0f);
+        glTranslatef(currentX * 4.0f, translateY * 4.0f, 0.0f);
+        if (currentCharacter == 1)
+            drawCat();
+        else if (currentCharacter == 2)
+            DrawCharacter();
+        glPopMatrix();
+    }
 }
 
 void drawHealthBar()
@@ -289,10 +513,9 @@ void updateJump()
     velocityY += gravity;
     translateY += velocityY;
 
-    
-    if (translateY <= groundY)
+    if (translateY <= characterGroundY) // Use character ground level
     {
-        translateY = groundY;
+        translateY = characterGroundY;
         velocityY = 0.0f;
         isJumping = false;
     }
@@ -304,6 +527,129 @@ void updateJump()
     }
 
     glutPostRedisplay();
+}
+
+// Add these new functions before the keyboard function
+void drawfire()
+{
+    for (const auto &projectile : projectiles)
+    {
+        if (!projectile.active)
+            continue;
+
+        glPushMatrix();
+        glScalef(0.25f, 0.25f, 1.0f); // Apply same scale as character
+        glTranslatef(projectile.x * 4.0f, projectile.y * 4.0f, 0.0f);
+
+        // Draw the fire projectile
+        glColor3f(1.0f, 1.0f, 0.0f); // Yellow color for fire
+        glBegin(GL_QUADS);
+        glVertex2f(-0.02f, -0.02f);
+        glVertex2f(0.02f, -0.02f);
+        glVertex2f(0.02f, 0.02f);
+        glVertex2f(-0.02f, 0.02f);
+        glEnd();
+
+        // Draw transparent collision box around fire
+        drawTransparentBox(0, 0, 0.2f, 0.2f); // Smaller box for projectile
+
+        glPopMatrix();
+    }
+}
+
+bool checkCollision(float x1, float y1, float x2, float y2, float radius1, float radius2)
+{
+    float dx = x1 - x2;
+    float dy = y1 - y2;
+    float distance = std::sqrt(dx * dx + dy * dy);
+    return distance < (radius1 + radius2);
+}
+
+void updatefire(int value)
+{
+    if (gameState != GAME_RUNNING)
+        return;
+
+    float fixedSpeed = 0.05f;
+    bool needsUpdate = false;
+
+    // Clean up inactive projectiles first
+    projectiles.remove_if([](const Projectile &p)
+                          { return !p.active; });
+
+    for (auto &projectile : projectiles)
+    {
+        if (!projectile.active)
+            continue;
+
+        projectile.x += (fixedSpeed * projectile.direction);
+
+        // Remove projectiles that go off screen
+        if (projectile.x > 4.0f || projectile.x < -4.0f)
+        {
+            projectile.active = false;
+            needsUpdate = true;
+            continue;
+        }
+
+        // Check collision with enemies using circle collision
+        for (auto &enemy : enemies)
+        {
+            if (enemy.isActive && !enemy.isFalling)
+            {
+                if (checkCollision(projectile.x, projectile.y, enemy.x, enemy.y,
+                                   COLLISION_RADIUS * 0.5f, COLLISION_RADIUS))
+                {
+                    projectile.active = false;
+                    enemy.isFalling = true;
+                    enemy.speed = 0.0f;
+                    enemiesKilled++;
+                    score += 100;
+
+                    if (enemiesKilled >= totalEnemiesInLevel)
+                    {
+                        if (level < maxLevel)
+                        {
+                            gameState = LEVEL_COMPLETE;
+                            score += 500;
+                            glutPostRedisplay();
+                        }
+                        else
+                        {
+                            gameState = GAME_WON;
+                            score += 1000;
+                            glutPostRedisplay();
+                        }
+                    }
+                    needsUpdate = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (needsUpdate)
+    {
+        glutPostRedisplay();
+    }
+
+    // Only continue timer if there are active projectiles
+    if (!projectiles.empty())
+    {
+        glutTimerFunc(16, updatefire, 0); // Increased update frequency
+    }
+}
+
+void updateMovement(float deltaTime)
+{
+    if (gameState != GAME_RUNNING || isTransitioning)
+        return;
+
+    // Update character position based on delta time
+    if (currentX < -1.0f)
+        currentX = -1.0f;
+    if (currentX > 1.0f)
+        currentX = 1.0f;
 }
 
 void keyboard(unsigned char key, int x, int y)
@@ -320,23 +666,25 @@ void keyboard(unsigned char key, int x, int y)
         }
         break;
     case 'r':
-        if (gameState == GAME_OVER)
+        if (gameState == GAME_OVER || gameState == GAME_WON)
         {
             gameState = START_SCREEN;
-            currentX = -3.5f;
+            currentX = -0.8f;
+            translateY = characterGroundY;
             currentCharacter = 1;
             level = 1;
+            score = 0; // Reset score
             enemies.clear();
+            characterHealth[0] = 2;
+            characterHealth[1] = 5;
+            targetX = -0.8f;
+            outgoingX = -0.8f;
+            isTransitioning = false;
+            isOutgoingDone = false;
             glutPostRedisplay();
         }
         break;
-    case 'g':
-        if (gameState == GAME_RUNNING)
-        {
-            gameState = GAME_OVER;
-            glutPostRedisplay();
-        }
-        break;
+
     case 'n':
         if (gameState == GAME_RUNNING && level < maxLevel)
         {
@@ -349,12 +697,14 @@ void keyboard(unsigned char key, int x, int y)
         if (gameState == GAME_RUNNING && !isTransitioning)
         {
             int selected = key - '0';
-            if (currentCharacter != selected)
+            // Only switch if the selected character is alive and different from current
+            if (currentCharacter != selected && characterHealth[selected - 1] > 0)
             {
                 nextCharacter = selected;
                 isTransitioning = true;
                 isOutgoingDone = false;
                 outgoingX = currentX;
+                lastAliveCharacter = selected;
                 glutTimerFunc(0, updateAnimation, 0);
             }
         }
@@ -389,6 +739,42 @@ void keyboard(unsigned char key, int x, int y)
         glutPostRedisplay();
         break;
 
+    case 'z':
+        if (gameState == GAME_RUNNING && canFire)
+        {
+            Projectile newProjectile;
+            newProjectile.x = currentX;
+            newProjectile.y = translateY;
+            newProjectile.direction = 1.0f;
+            newProjectile.active = true;
+            projectiles.push_back(newProjectile);
+
+            canFire = false;
+            glutTimerFunc(FIRE_COOLDOWN, [](int)
+                          { canFire = true; }, 0);
+
+            // Start projectile updates if not already running
+            if (projectiles.size() == 1)
+            {
+                glutTimerFunc(16, updatefire, 0); // Increased update frequency
+            }
+        }
+        break;
+
+    case 'k':
+        if (gameState == LEVEL_COMPLETE)
+        {
+            level++;
+            gameState = GAME_RUNNING;
+            enemies.clear();
+            enemiesKilled = 0;
+            projectiles.clear(); // Clear any remaining projectiles
+            spawnEnemies(enemiesPerLevel[level]);
+            glutTimerFunc(30, updateEnemies, 0);
+            glutPostRedisplay();
+        }
+        break;
+
     case 27:
         exit(0);
     }
@@ -396,6 +782,14 @@ void keyboard(unsigned char key, int x, int y)
 
 void display()
 {
+    // Calculate delta time
+    float currentTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+    float deltaTime = currentTime - lastFrameTime;
+    lastFrameTime = currentTime;
+
+    // Update movement
+    updateMovement(deltaTime);
+
     glClearColor(1.0, 1.0, 1.0, 1.0);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -414,6 +808,18 @@ void display()
             drawCharacter();
         drawEnemies();
         drawHealthBar();
+        drawfire();
+
+        // Draw score and level info
+        char scoreText[100];
+        snprintf(scoreText, sizeof(scoreText), "Level: %d  Enemies: %d/%d  Score: %d",
+                 level, enemiesKilled, totalEnemiesInLevel, score);
+        glColor3f(0.0f, 0.0f, 0.0f);
+        glRasterPos2f(-0.9f, 0.9f);
+        for (const char *c = scoreText; *c; c++)
+        {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+        }
         break;
     case PAUSED:
         drawText("Game Paused");
@@ -421,6 +827,20 @@ void display()
         break;
     case GAME_OVER:
         drawText("Game Over!");
+        snprintf(scoreText, sizeof(scoreText), "Final Score: %d", score);
+        drawText(scoreText);
+        drawText("Press 'r' to Restart or 'Esc' to Quit");
+        break;
+    case LEVEL_COMPLETE:
+        drawCharacter();
+        char levelText[100];
+        snprintf(levelText, sizeof(levelText), "Level %d Complete! Score: %d", level, score);
+        drawText(levelText);
+        drawText("Press 'k' to continue");
+        break;
+    case GAME_WON:
+        snprintf(scoreText, sizeof(scoreText), "Congratulations! Final Score: %d", score);
+        drawText(scoreText);
         drawText("Press 'r' to Restart or 'Esc' to Quit");
         break;
     }
