@@ -4,7 +4,7 @@
 #include "enemy.h"
 
 Enemy::Enemy(float x, float y, float speed) : x(x), y(y), speed(speed), rotation(0.0f),
-                                              rotationSpeed(50.0f), isActive(true), isFalling(false), hasPassed(false) {}
+                                              rotationSpeed(50.0f), isActive(true), isFalling(false), hasPassed(false), health(2) {}
 
 void Head()
 {

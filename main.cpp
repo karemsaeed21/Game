@@ -24,6 +24,7 @@ struct Projectile
     float y;
     float direction; // Direction of movement (1.0f for right)
     bool active;
+    float verticalSpeed; // Added for vertical movement
 };
 
 std::list<Projectile> projectiles;
@@ -205,8 +206,33 @@ void drawEnemies()
         glPushMatrix();
         glScalef(0.25f, 0.25f, 1.0f);
         glTranslatef(enemy.x * 4.0f, enemy.y * 4.0f, 0.0f);
-        glRotatef(enemy.rotation, 0.0f, 0.0f, 1.0f); // Add rotation
+        glRotatef(enemy.rotation, 0.0f, 0.0f, 1.0f);
 
+        // Draw enemy health bar
+        float healthBarWidth = 0.2f;
+        float healthBarHeight = 0.02f;
+        float healthBarY = 0.3f; // Position above enemy
+
+        // Draw background (gray)
+        glColor3f(0.5f, 0.5f, 0.5f);
+        glBegin(GL_QUADS);
+        glVertex2f(-healthBarWidth / 2, healthBarY);
+        glVertex2f(healthBarWidth / 2, healthBarY);
+        glVertex2f(healthBarWidth / 2, healthBarY + healthBarHeight);
+        glVertex2f(-healthBarWidth / 2, healthBarY + healthBarHeight);
+        glEnd();
+
+        // Draw health (green)
+        float healthPercentage = enemy.health / 2.0f; // Since max health is 2
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glBegin(GL_QUADS);
+        glVertex2f(-healthBarWidth / 2, healthBarY);
+        glVertex2f(-healthBarWidth / 2 + (healthBarWidth * healthPercentage), healthBarY);
+        glVertex2f(-healthBarWidth / 2 + (healthBarWidth * healthPercentage), healthBarY + healthBarHeight);
+        glVertex2f(-healthBarWidth / 2, healthBarY + healthBarHeight);
+        glEnd();
+
+        // Draw enemy
         drawCreeper();
 
         // Draw enemy collision box with same size as character
@@ -573,7 +599,6 @@ void updatefire(int value)
     float fixedSpeed = 0.05f;
     bool needsUpdate = false;
 
-    // Clean up inactive projectiles first
     projectiles.remove_if([](const Projectile &p)
                           { return !p.active; });
 
@@ -582,17 +607,24 @@ void updatefire(int value)
         if (!projectile.active)
             continue;
 
+        // Update horizontal position
         projectile.x += (fixedSpeed * projectile.direction);
 
+        // Update vertical position if projectile has vertical speed
+        if (projectile.verticalSpeed != 0.0f)
+        {
+            projectile.y += projectile.verticalSpeed;
+            // No gravity for downward shots - they move in a straight line
+        }
+
         // Remove projectiles that go off screen
-        if (projectile.x > 4.0f || projectile.x < -4.0f)
+        if (projectile.x > 4.0f || projectile.x < -4.0f || projectile.y < -5.0f)
         {
             projectile.active = false;
             needsUpdate = true;
             continue;
         }
 
-        // Check collision with enemies using circle collision
         for (auto &enemy : enemies)
         {
             if (enemy.isActive && !enemy.isFalling)
@@ -601,24 +633,39 @@ void updatefire(int value)
                                    COLLISION_RADIUS * 0.5f, COLLISION_RADIUS))
                 {
                     projectile.active = false;
-                    enemy.isFalling = true;
-                    enemy.speed = 0.0f;
-                    enemiesKilled++;
-                    score += 100;
 
-                    if (enemiesKilled >= totalEnemiesInLevel)
+                    // Different damage based on character
+                    if (currentCharacter == 1)
                     {
-                        if (level < maxLevel)
+                        // First character (low health) - one shot kill
+                        enemy.health = 0;
+                    }
+                    else
+                    {
+                        // Second character (high health) - two shots needed
+                        enemy.health--;
+                    }
+
+                    if (enemy.health <= 0)
+                    {
+                        enemy.isFalling = true;
+                        enemy.speed = 0.0f;
+                        enemiesKilled++;
+                        score += 100;
+
+                        if (enemiesKilled >= totalEnemiesInLevel)
                         {
-                            gameState = LEVEL_COMPLETE;
-                            score += 500;
-                            glutPostRedisplay();
-                        }
-                        else
-                        {
-                            gameState = GAME_WON;
-                            score += 1000;
-                            glutPostRedisplay();
+                            if (level < maxLevel)
+                            {
+                                gameState = LEVEL_COMPLETE;
+                                glutPostRedisplay();
+                            }
+                            else
+                            {
+                                gameState = GAME_WON;
+                                score += 1000;
+                                glutPostRedisplay();
+                            }
                         }
                     }
                     needsUpdate = true;
@@ -633,10 +680,9 @@ void updatefire(int value)
         glutPostRedisplay();
     }
 
-    // Only continue timer if there are active projectiles
     if (!projectiles.empty())
     {
-        glutTimerFunc(16, updatefire, 0); // Increased update frequency
+        glutTimerFunc(16, updatefire, 0);
     }
 }
 
@@ -673,7 +719,7 @@ void keyboard(unsigned char key, int x, int y)
             translateY = characterGroundY;
             currentCharacter = 1;
             level = 1;
-            score = 0; // Reset score
+            score = 0;
             enemies.clear();
             characterHealth[0] = 2;
             characterHealth[1] = 5;
@@ -681,6 +727,8 @@ void keyboard(unsigned char key, int x, int y)
             outgoingX = -0.8f;
             isTransitioning = false;
             isOutgoingDone = false;
+            projectiles.clear();
+            canFire = true; // Reset firing cooldown
             glutPostRedisplay();
         }
         break;
@@ -710,14 +758,17 @@ void keyboard(unsigned char key, int x, int y)
         }
         break;
     case 'a':
+    case 'A':
         if (gameState == GAME_RUNNING && !isTransitioning)
             currentX -= 0.1f;
         break;
     case 'd':
+    case 'D':
         if (gameState == GAME_RUNNING && !isTransitioning)
             currentX += 0.1f;
         break;
     case ' ':
+    case 'w':
         if (gameState == GAME_RUNNING && !isJumping)
         {
             isJumping = true;
@@ -727,6 +778,7 @@ void keyboard(unsigned char key, int x, int y)
         }
         break;
     case 'p':
+    case 'P':
         if (gameState == GAME_RUNNING)
         {
             gameState = PAUSED;
@@ -739,13 +791,15 @@ void keyboard(unsigned char key, int x, int y)
         glutPostRedisplay();
         break;
 
-    case 'z':
+    case 'u':
+    case 'U':
         if (gameState == GAME_RUNNING && canFire)
         {
             Projectile newProjectile;
             newProjectile.x = currentX;
             newProjectile.y = translateY;
             newProjectile.direction = 1.0f;
+            newProjectile.verticalSpeed = isJumping ? -0.05f : 0.0f; // Negative value for downward movement
             newProjectile.active = true;
             projectiles.push_back(newProjectile);
 
@@ -753,15 +807,15 @@ void keyboard(unsigned char key, int x, int y)
             glutTimerFunc(FIRE_COOLDOWN, [](int)
                           { canFire = true; }, 0);
 
-            // Start projectile updates if not already running
             if (projectiles.size() == 1)
             {
-                glutTimerFunc(16, updatefire, 0); // Increased update frequency
+                glutTimerFunc(16, updatefire, 0);
             }
         }
         break;
 
     case 'k':
+    case 'K':
         if (gameState == LEVEL_COMPLETE)
         {
             level++;
@@ -822,26 +876,21 @@ void display()
         }
         break;
     case PAUSED:
-        drawText("Game Paused");
-        drawText("Press 'p' to Resume");
+        drawText("Game Paused Press 'p' to Resume");
         break;
     case GAME_OVER:
-        drawText("Game Over!");
-        snprintf(scoreText, sizeof(scoreText), "Final Score: %d", score);
+        snprintf(scoreText, sizeof(scoreText), "Game Over! Final Score: %d Press 'r' to Restart or 'Esc' to Quit", score);
         drawText(scoreText);
-        drawText("Press 'r' to Restart or 'Esc' to Quit");
         break;
     case LEVEL_COMPLETE:
         drawCharacter();
         char levelText[100];
-        snprintf(levelText, sizeof(levelText), "Level %d Complete! Score: %d", level, score);
+        snprintf(levelText, sizeof(levelText), "Level %d Complete! Score: %d Press 'k' to continue", level, score);
         drawText(levelText);
-        drawText("Press 'k' to continue");
         break;
     case GAME_WON:
-        snprintf(scoreText, sizeof(scoreText), "Congratulations! Final Score: %d", score);
+        snprintf(scoreText, sizeof(scoreText), "Congratulations! Final Score: %d Press 'r' to Restart or 'Esc' to Quit", score);
         drawText(scoreText);
-        drawText("Press 'r' to Restart or 'Esc' to Quit");
         break;
     }
     glPopAttrib();

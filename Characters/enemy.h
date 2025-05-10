@@ -40,10 +40,11 @@ public:
     float y;
     float speed;
     float rotation;
-    float rotationSpeed; // Add rotation speed
+    float rotationSpeed;
     bool isActive;
     bool isFalling;
     bool hasPassed;
+    int health;
 
     Enemy(float x, float y, float speed);
 };
